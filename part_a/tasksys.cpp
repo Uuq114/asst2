@@ -171,50 +171,63 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
 
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
     maxThread = num_threads;
-    threadPool.reserve(maxThread);
-    producerFinish = false;
+    stop = false;
+    totalTask = finishedTask = 0;
+    
+    for (int i = 0; i < maxThread; i++) {
+        workers.emplace_back(std::thread([this]() {sleepThreadRunFunc();}));
+    }
 }
 
-TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {}
+TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
+    stop = true;
+    cvConsumer.notify_all();
+    for (auto& w : workers) {
+        w.join();
+    }
+}
 
-void TaskSystemParallelThreadPoolSleeping::sleepThreadRunFunc(IRunnable* runnable, int num_total_tasks) {
+void TaskSystemParallelThreadPoolSleeping::sleepThreadRunFunc() {
     while (true) {
-        std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [this]() {
-            return !queue.empty() || producerFinish;
-        });
-        int taskIndex;
-        if (queue.empty()) {
+        std::unique_lock<std::mutex> lockConsumer(mutexConsumer);
+        auto func = [this]() { return stop || (nextTask < totalTask); };
+        cvConsumer.wait(lockConsumer, func);
+
+        if (stop && nextTask == totalTask) {
             // std::cerr << "worker quit" << std::endl;
             break;
-        } else {
-            taskIndex = queue.front();
-            queue.pop();
         }
-        // std::cerr << "work run: " << taskIndex << std::endl;
-        runnable->runTask(taskIndex, num_total_tasks);
+
+        int taskIndex = nextTask++;
+        lockConsumer.unlock();
+        // std::cerr << "worker run: " << taskIndex << std::endl;
+        runner->runTask(taskIndex, totalTask);
+
+        {
+            std::lock_guard<std::mutex> lockFinish(mutexFinish);
+            finishedTask++;
+            // std::cerr << "finished task: " << finishedTask << std::endl;
+            if (finishedTask == totalTask) {
+                cvProducer.notify_all();
+            }
+        }
     }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
+    runner = runnable;
+    totalTask = num_total_tasks;
+    finishedTask = 0;
     {
-        std::lock_guard<std::mutex> lock(mutex);
-        for (int i = 0; i < num_total_tasks; i++) {
-            queue.emplace(i);
-        }
+        std::lock_guard<std::mutex> lockConsumer(mutexConsumer);
+        nextTask = 0;
     }
-    // std::cerr << "complete produce" << std::endl;
+    // std::cerr << "producer notify all consumer" << std::endl;
+    cvConsumer.notify_all();
 
-    for (int i = 0; i < maxThread; i++) {
-        threadPool.emplace_back(std::thread(&TaskSystemParallelThreadPoolSleeping::sleepThreadRunFunc, this, runnable, num_total_tasks));
-    }
-    // std::cerr << "begin notify" << std::endl;
-    producerFinish = true;
-    cv.notify_all();
-
-    for(auto& t : threadPool) {
-        t.join();
-    }
+    std::unique_lock<std::mutex> lockFinish(mutexFinish);
+    auto func = [this]() { return finishedTask == totalTask; };
+    cvProducer.wait(lockFinish, func);
 }
 
 TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,

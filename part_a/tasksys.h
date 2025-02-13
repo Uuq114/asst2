@@ -88,17 +88,18 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         ~TaskSystemParallelThreadPoolSleeping();
         const char* name();
         void run(IRunnable* runnable, int num_total_tasks);
-        void sleepThreadRunFunc(IRunnable* runnable, int num_total_tasks);
+        void sleepThreadRunFunc();
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
     private:
         int maxThread;
-        std::condition_variable cv;
-        std::mutex mutex;   // proctect queue
-        std::queue<int> queue;
-        std::vector<std::thread> threadPool;
-        bool producerFinish;
+        IRunnable* runner;
+        std::vector<std::thread> workers;
+        std::condition_variable cvProducer, cvConsumer;
+        std::mutex mutexConsumer, mutexFinish;
+        int totalTask, nextTask, finishedTask;
+        bool stop;
 };
 
 #endif
