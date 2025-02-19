@@ -127,57 +127,86 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
 }
 
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
-    //
-    // TODO: CS149 student implementations may decide to perform setup
-    // operations (such as thread pool construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+    maxThread = num_threads;
+    workers.reserve(maxThread);
+    stop = false;
+    finishedTask = -1;
+    nextTaskId = 0;
+    for (int i = 0; i < maxThread; i++) {
+        workers.emplace_back(std::thread(&TaskSystemParallelThreadPoolSleeping::workerFunc, this));
+    }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
-    //
-    // TODO: CS149 student implementations may decide to perform cleanup
-    // operations (such as thread pool shutdown construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+    stop = true;
+    for (auto& t : workers) {
+        t.join();
+    }
+}
+
+void TaskSystemParallelThreadPoolSleeping::workerFunc() {
+    while (!stop) {
+        ReadyTask task;
+        bool runTask = false;
+        mutexReadyQueue.lock();
+        if (!readyQueue.empty()) {
+            task = readyQueue.front();
+            if (task.currentTask < task.totalTask) {
+                runTask = true;
+                readyQueue.front().currentTask++;
+            } else {
+                readyQueue.pop();
+            }
+        } else {
+            mutexWaitingQueue.lock();
+            while (!waitingQueue.empty()) {
+                auto& nextWaitingTask = waitingQueue.top();
+                if (nextWaitingTask.depTaskMaxId > finishedTask) break;
+                readyQueue.push(ReadyTask(nextWaitingTask.runner, nextWaitingTask.id, nextWaitingTask.totalTask));
+                isTaskDone.insert({nextWaitingTask.id, {0, nextWaitingTask.totalTask}});
+                waitingQueue.pop();
+            }
+            mutexWaitingQueue.unlock();
+        }
+        mutexReadyQueue.unlock();
+
+        if (runTask) {
+            task.runner->runTask(task.currentTask, task.totalTask);
+            // std::cerr << "worker run, cur task:" << task.currentTask << ", total:" << task.totalTask << std::endl;
+            mutexMap.lock();
+            auto& [finished, total] = isTaskDone[task.id];
+            finished++;
+            if (finished == total) {
+                isTaskDone.erase(task.id);
+                finishedTask = std::max(task.id, finishedTask);
+            }
+            mutexMap.unlock();
+        }
+    }
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
-
-
-    //
-    // TODO: CS149 students will modify the implementation of this
-    // method in Parts A and B.  The implementation provided below runs all
-    // tasks sequentially on the calling thread.
-    //
-
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
-    }
+    runAsyncWithDeps(runnable, num_total_tasks, {});
+    sync();
 }
 
-TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
-                                                    const std::vector<TaskID>& deps) {
-
-
-    //
-    // TODO: CS149 students will implement this method in Part B.
-    //
-
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks, const std::vector<TaskID>& deps) {
+    TaskID dependancy = -1;
+    if (!deps.empty()) {
+        dependancy = *std::max(deps.begin(), deps.end());
     }
-
-    return 0;
+    WaitingTask task(runnable, nextTaskId, dependancy, num_total_tasks);
+    mutexWaitingQueue.lock();
+    waitingQueue.push(std::move(task));
+    mutexWaitingQueue.unlock();
+    return nextTaskId++;
 }
 
 void TaskSystemParallelThreadPoolSleeping::sync() {
-
-    //
-    // TODO: CS149 students will modify the implementation of this method in Part B.
-    //
-
-    return;
+    while (true) {
+        std::lock_guard<std::mutex> lock(mutexMap);
+        if (finishedTask + 1 == nextTaskId) {
+            break;
+        }
+    }
 }
